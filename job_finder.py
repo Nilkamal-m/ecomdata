@@ -31,7 +31,8 @@ CONFIG = {
     # --- EMAIL SETTINGS ---
     "SENDER_EMAIL": os.environ.get("SENDER_EMAIL", "itsneel.3t@gmail.com"),
     "SENDER_APP_PASSWORD": os.environ.get("SENDER_APP_PASSWORD"),
-    "RECEIVER_EMAIL": os.environ.get("RECEIVER_EMAIL", "nilkamal.35@gmail.com"),
+    "RECEIVER_EMAIL": os.environ.get("RECEIVER_EMAIL", "nilkamal.35@gmail.com"), # Supports comma-separated emails
+    "CC_EMAIL": os.environ.get("CC_EMAIL"),                                     # Optional comma-separated CC recipients
 
     # --- API SEARCH CRITERIA (OPTIMIZED FOR MAXIMUM HIGH-QUALITY MATCHES) ---
     "SEARCH_TITLE": "Data Engineer",  # Primary query passed to LinkedIn scraper
@@ -44,7 +45,7 @@ CONFIG = {
         "Software Engineer - Data", "Data Pipeline Engineer"
     ],
     "SEARCH_LOCATION": "India",       # National anchor location for 1 single API call
-    "DATE_POSTED": "r86400",         # "r86400" = 24h, "r604800" = past week, "r2592000" = past month
+    "DATE_POSTED": "r86400",          # "r86400" = 24h, "r604800" = past week, "r2592000" = past month
     "RESULT_LIMIT": 300,              # Scrapes up to 300 records in 1 API call for max coverage
     "TARGET_COMPANIES": [],           # Empty [] searches ALL companies across India (max coverage!)
     "EXPERIENCE_LEVELS": [],          # Empty [] includes unclassified/Not Applicable recruiter tags
@@ -75,8 +76,8 @@ CONFIG = {
         "kolkata", "remote", "anywhere", "work from home", "wfh", "hybrid - kolkata"
     ],
     "EXCLUDED_CITY_KEYWORDS": [
-        "bangalore", "bengaluru", "mumbai", "pune", "hyderabad", "chennai",
-        "gurgaon", "gurugram", "noida", "delhi", "ahmedabad", "coimbatore"
+        "bangalore", "bengaluru", "mumbai", "pune", "hyderabad",
+        "gurgaon", "gurugram", "noida", "delhi", "ahmedabad"
     ],
 
     # --- LIVE LINK VALIDATION SETTINGS ---
@@ -315,8 +316,22 @@ def get_sortable_date_timestamp(job):
     if not text:
         return 0
 
+    # Check explicit date formats first
+    date_formats = [
+        "%Y-%m-%dT%H:%M:%S.%fZ", "%Y-%m-%dT%H:%M:%SZ", "%Y-%m-%dT%H:%M:%S",
+        "%Y-%m-%d", "%B %d, %Y", "%B %d %Y", "%d %B %Y", "%d/%m/%Y", "%m/%d/%Y"
+    ]
+    for fmt in date_formats:
+        try:
+            parsed_date = datetime.datetime.strptime(str(raw_date).strip(), fmt)
+            return parsed_date.timestamp()
+        except ValueError:
+            continue
+
     if any(k in text for k in ("just posted", "today", "minute", "hour")):
         return now.timestamp()
+    if "yesterday" in text:
+        return (now - datetime.timedelta(days=1)).timestamp()
 
     match = re.search(r"(\d+)\s*hour", text)
     if match:
@@ -332,17 +347,6 @@ def get_sortable_date_timestamp(job):
     if match:
         weeks = int(match.group(1))
         return (now - datetime.timedelta(days=weeks * 7)).timestamp()
-
-    date_formats = [
-        "%Y-%m-%dT%H:%M:%S.%fZ", "%Y-%m-%dT%H:%M:%SZ", "%Y-%m-%dT%H:%M:%S",
-        "%Y-%m-%d", "%B %d, %Y", "%B %d %Y", "%d %B %Y", "%d/%m/%Y", "%m/%d/%Y"
-    ]
-    for fmt in date_formats:
-        try:
-            parsed_date = datetime.datetime.strptime(text, fmt)
-            return parsed_date.timestamp()
-        except ValueError:
-            continue
 
     return 0
 
@@ -447,6 +451,7 @@ def process_and_partition_jobs(raw_items, config):
     primary_jobs = []
     excluded_city_jobs = []
     missing_skill_counter = Counter()
+    matched_skill_counter = Counter()
 
     seen_urls = set()
     seen_history = load_seen_jobs(config.get("SEEN_JOBS_FILE", "temp.csv"))
@@ -507,6 +512,9 @@ def process_and_partition_jobs(raw_items, config):
             skipped_no_skills += 1
             continue
 
+        for m_sk in matched_skills:
+            matched_skill_counter[m_sk] += 1
+
         # 7. Identify missing industry skills for resume optimization
         missing_skills = find_missing_industry_skills(full_text, config["RESUME_SKILLS"], config.get("INDUSTRY_GAP_SKILLS", []))
         for m_skill in missing_skills:
@@ -546,7 +554,7 @@ def process_and_partition_jobs(raw_items, config):
     print(f"-> Partitioning Summary: {len(primary_jobs)} Primary (Kolkata/Remote), {len(excluded_city_jobs)} Excluded Cities / Tech Hubs.")
     print(f"   (Filtered out: {skipped_seen_history} seen in temp.csv, {skipped_easy_apply} EASY_APPLY, {skipped_excluded_company} excluded companies, {skipped_stale} stale, {skipped_no_skills} no skill match, {skipped_title} title mismatch).")
 
-    return primary_jobs, excluded_city_jobs, missing_skill_counter
+    return primary_jobs, excluded_city_jobs, missing_skill_counter, matched_skill_counter
 
 
 # ==============================================================================
@@ -595,21 +603,46 @@ def render_job_card(job, idx, accent_color, badge_bg, badge_fg):
     """
 
 
-def send_email_batch(batch_primary, batch_excluded, batch_num, total_batches, missing_skill_counter, total_overall_jobs, config):
+def parse_email_list(email_setting):
+    """Parses single email string or comma/semicolon-separated email strings into a clean list of emails."""
+    if not email_setting:
+        return []
+    if isinstance(email_setting, (list, tuple, set)):
+        return [str(e).strip() for e in email_setting if e and str(e).strip()]
+    raw_list = re.split(r"[,;]+", str(email_setting))
+    return [e.strip() for e in raw_list if e and e.strip()]
+
+
+def send_email_batch(batch_primary, batch_excluded, batch_num, total_batches, missing_skill_counter, matched_skill_counter, total_overall_jobs, config):
     """Sends one unclipped HTML email batch guaranteed to fit well under Gmail's 102 KB limit."""
     sender_email = config.get("SENDER_EMAIL")
     sender_pass = config.get("SENDER_APP_PASSWORD")
-    receiver_email = config.get("RECEIVER_EMAIL")
+
+    receiver_emails = parse_email_list(config.get("RECEIVER_EMAIL"))
+    cc_emails = parse_email_list(config.get("CC_EMAIL"))
+
+    if not receiver_emails:
+        print("[Error] No receiver email configured. Please set RECEIVER_EMAIL in environment variables.")
+        return
 
     batch_total = len(batch_primary) + len(batch_excluded)
-    run_date = datetime.datetime.now().strftime("%d %b %Y, %I:%M %p")
+    ist_tz = datetime.timezone(datetime.timedelta(hours=5, minutes=30))
+    run_date = datetime.datetime.now(ist_tz).strftime("%d %b %Y, %I:%M %p IST")
 
     batch_label = f" (Part {batch_num}/{total_batches})" if total_batches > 1 else ""
 
     msg = MIMEMultipart("alternative")
-    msg["Subject"] = f"🎯 Job Alert{batch_label}: {batch_total} Verified Openings ({len(batch_primary)} Kolkata/Remote | {len(batch_excluded)} Excluded Cities)"
+    if total_overall_jobs == 0:
+        msg["Subject"] = "🎯 Job Alert: 0 New Verified Openings Today"
+    else:
+        msg["Subject"] = f"🎯 Job Alert{batch_label}: {batch_total} Verified Openings ({len(batch_primary)} Kolkata/Remote | {len(batch_excluded)} Excluded Cities)"
+
     msg["From"] = sender_email
-    msg["To"] = receiver_email
+    msg["To"] = ", ".join(receiver_emails)
+    if cc_emails:
+        msg["Cc"] = ", ".join(cc_emails)
+
+    all_recipients = list(dict.fromkeys(receiver_emails + cc_emails))
 
     top_missing = missing_skill_counter.most_common(5)
     gap_badges_html = ""
@@ -628,7 +661,7 @@ def send_email_batch(batch_primary, batch_excluded, batch_num, total_batches, mi
         <!-- Header Banner -->
         <div style="background: linear-gradient(135deg, #0f172a, #2563eb); border-radius: 8px; padding: 24px 28px; margin-bottom: 24px;">
           <h1 style="margin: 0 0 6px 0; color: #ffffff; font-size: 22px;">Data Engineer Job Digest — Nilkamal Mahato</h1>
-          <p style="margin: 0; color: #cbd5e1; font-size: 13px;">Generated {run_date} · Showing {batch_total} Jobs{batch_label} (100% Guaranteed Unclipped HTML)</p>
+          <p style="margin: 0; color: #cbd5e1; font-size: 13px;">Generated {run_date} · Showing {batch_total} Jobs{batch_label} (Sorted Newest First)</p>
         </div>
 
         <!-- Summary Stats -->
@@ -639,11 +672,21 @@ def send_email_batch(batch_primary, batch_excluded, batch_num, total_batches, mi
         </div>
     """
 
+    if total_overall_jobs == 0:
+        html_body += """
+        <div style="background-color: #ffffff; padding: 22px 24px; border-radius: 10px; border: 1px solid #cbd5e1; border-left: 6px solid #64748b; margin-bottom: 24px; box-shadow: 0 4px 6px -1px rgba(0,0,0,0.04);">
+            <h3 style="margin: 0 0 8px 0; color: #0f172a; font-size: 17px; font-weight: 700;">ℹ️ No New Matching Openings Found Today</h3>
+            <p style="margin: 0; font-size: 13px; color: #475569; line-height: 1.6;">
+                Our daily scanner completed today's search across India, but no new un-notified Data Engineering roles met the keyword &amp; recency criteria today (or all retrieved roles were previously alerted). We will automatically scan and notify you on the next scheduled run!
+            </p>
+        </div>
+        """
+
     if batch_primary:
         html_body += f"""
         <div style="background-color: #eff6ff; padding: 12px 18px; border-radius: 6px; margin-bottom: 20px; border-left: 4px solid #2563eb;">
             <h3 style="margin: 0; color: #1d4ed8;">SECTION 1: Primary Target Jobs (Kolkata &amp; Remote)</h3>
-            <p style="margin: 4px 0 0 0; font-size: 13px; color: #475569;">High priority opportunities located in Kolkata or Remote/WFH.</p>
+            <p style="margin: 4px 0 0 0; font-size: 13px; color: #475569;">High priority opportunities located in Kolkata or Remote/WFH (Sorted Newest First).</p>
         </div>
         """
         for idx, job in enumerate(batch_primary, 1):
@@ -653,7 +696,7 @@ def send_email_batch(batch_primary, batch_excluded, batch_num, total_batches, mi
         html_body += f"""
         <div style="background-color: #fff7ed; padding: 12px 18px; border-radius: 6px; margin-top: 32px; margin-bottom: 20px; border-left: 4px solid #ea580c;">
             <h3 style="margin: 0; color: #c2410c;">SECTION 2: Excluded Cities / Major Tech Hubs</h3>
-            <p style="margin: 4px 0 0 0; font-size: 13px; color: #475569;">Matching DE roles in Bangalore, Pune, Hyderabad, Gurgaon, Noida, Mumbai, Chennai, etc.</p>
+            <p style="margin: 4px 0 0 0; font-size: 13px; color: #475569;">Matching DE roles in Bangalore, Pune, Hyderabad, Gurgaon, Noida, Mumbai, Chennai, etc (Sorted Newest First).</p>
         </div>
         """
         start_idx = len(batch_primary) + 1
@@ -680,8 +723,11 @@ def send_email_batch(batch_primary, batch_excluded, batch_num, total_batches, mi
             </div>
         </div>
 
-        <hr style="border: 0; border-top: 1px solid #e2e8f0; margin-top: 30px;">
-        <p style="font-size: 11px; color: #94a3b8; text-align: center;">
+        <hr style="border: 0; border-top: 1px solid #cbd5e1; margin-top: 36px;">
+        <p style="font-size: 15px; color: #1e293b; text-align: center; font-weight: 700; margin-top: 24px; margin-bottom: 8px; letter-spacing: 0.3px;">
+            Thanks me later –– NeeL 💙
+        </p>
+        <p style="font-size: 11px; color: #94a3b8; text-align: center; margin-top: 0;">
             Automated Data Engineering Job Alert System · Single Apify API execution · Guaranteed 100% Delivery.
         </p>
       </body>
@@ -693,17 +739,19 @@ def send_email_batch(batch_primary, batch_excluded, batch_num, total_batches, mi
     try:
         with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
             server.login(sender_email, sender_pass)
-            server.sendmail(sender_email, receiver_email, msg.as_string())
-        print(f"🚀 Email batch {batch_num}/{total_batches} ({batch_total} jobs) sent successfully to {receiver_email}!")
+            server.sendmail(sender_email, all_recipients, msg.as_string())
+        cc_info = f" (CC: {', '.join(cc_emails)})" if cc_emails else ""
+        print(f"🚀 Email batch {batch_num}/{total_batches} ({batch_total} jobs) sent successfully to {', '.join(receiver_emails)}{cc_info}!")
     except Exception as e:
         print(f"[Error] Failed to send email batch {batch_num}: {e}")
 
 
-def send_partitioned_email_alert(primary_jobs, excluded_jobs, missing_skill_counter, config):
+def send_partitioned_email_alert(primary_jobs, excluded_jobs, missing_skill_counter, matched_skill_counter, config):
     """Chunks jobs into batches of max 40 jobs per email so that Gmail NEVER clips any email and ALL 100+ jobs deliver cleanly."""
     total_jobs = len(primary_jobs) + len(excluded_jobs)
     if total_jobs == 0:
-        print("No matching jobs found today. Skipping email alert.")
+        print("No matching jobs found today. Sending 0-job notification email...")
+        send_email_batch([], [], 1, 1, missing_skill_counter, matched_skill_counter, 0, config)
         return
 
     # Batching: Max 40 jobs per email guarantees size is < 70 KB (far below Gmail's 102 KB clip limit)
@@ -717,7 +765,7 @@ def send_partitioned_email_alert(primary_jobs, excluded_jobs, missing_skill_coun
         b_primary = [j for tag, j in batch_slice if tag == "primary"]
         b_excluded = [j for tag, j in batch_slice if tag == "excluded"]
 
-        send_email_batch(b_primary, b_excluded, b_idx + 1, total_batches, missing_skill_counter, total_jobs, config)
+        send_email_batch(b_primary, b_excluded, b_idx + 1, total_batches, missing_skill_counter, matched_skill_counter, total_jobs, config)
 
 
 # ==============================================================================
@@ -728,7 +776,7 @@ if __name__ == "__main__":
     raw_jobs = fetch_linkedin_jobs_single_call(CONFIG)
 
     # Step 2: Filter by title, applyType, company & temp.csv history + calculate skill gap
-    primary_listings, excluded_listings, missing_skill_counter = process_and_partition_jobs(raw_jobs, CONFIG)
+    primary_listings, excluded_listings, missing_skill_counter, matched_skill_counter = process_and_partition_jobs(raw_jobs, CONFIG)
 
     # Step 3: Verify live link validity before sending
     primary_listings = verify_jobs_live(primary_listings, "Primary Kolkata/Remote")
@@ -739,4 +787,4 @@ if __name__ == "__main__":
     save_seen_jobs(all_final_jobs, CONFIG.get("SEEN_JOBS_FILE", "temp.csv"))
 
     # Step 5: Dispatch email alert in unclipped batches with Resume Optimization & Skill Gap section
-    send_partitioned_email_alert(primary_listings, excluded_listings, missing_skill_counter, CONFIG)
+    send_partitioned_email_alert(primary_listings, excluded_listings, missing_skill_counter, matched_skill_counter, CONFIG)
