@@ -29,9 +29,9 @@ CONFIG = {
     "TOKEN_ROTATION_MODE": "10_DAYS", # "10_DAYS" (10-day block rotation), "RANDOM", "FAILOVER"
 
     # --- EMAIL SETTINGS ---
-    "SENDER_EMAIL": os.environ.get("SENDER_EMAIL", "itsneel.3t@gmail.com"),
+    "SENDER_EMAIL": os.environ.get("SENDER_EMAIL"),
     "SENDER_APP_PASSWORD": os.environ.get("SENDER_APP_PASSWORD"),
-    "RECEIVER_EMAIL": os.environ.get("RECEIVER_EMAIL", "nilkamal.35@gmail.com"), # Supports comma-separated emails
+    "RECEIVER_EMAIL": os.environ.get("RECEIVER_EMAIL"), # Supports comma-separated emails
     "CC_EMAIL": os.environ.get("CC_EMAIL"),                                     # Optional comma-separated CC recipients
 
     # --- API SEARCH CRITERIA (OPTIMIZED FOR MAXIMUM HIGH-QUALITY MATCHES) ---
@@ -266,6 +266,28 @@ def fetch_linkedin_jobs_single_call(config):
 # ==============================================================================
 # 4. RESUME OPTIMIZATION & RECENTNESS HELPERS
 # ==============================================================================
+def format_posted_date_ist(posted_raw):
+    """Converts UTC/ISO date string or relative text into clean IST date string."""
+    if not posted_raw:
+        return "Recently"
+    text = str(posted_raw).strip()
+    ist_tz = datetime.timezone(datetime.timedelta(hours=5, minutes=30))
+
+    date_formats = [
+        "%Y-%m-%dT%H:%M:%S.%fZ", "%Y-%m-%dT%H:%M:%SZ", "%Y-%m-%dT%H:%M:%S",
+        "%Y-%m-%d"
+    ]
+    for fmt in date_formats:
+        try:
+            dt_utc = datetime.datetime.strptime(text, fmt).replace(tzinfo=datetime.timezone.utc)
+            dt_ist = dt_utc.astimezone(ist_tz)
+            return dt_ist.strftime("%d %b %Y, %I:%M %p IST")
+        except ValueError:
+            continue
+
+    return text
+
+
 def is_recent_enough(posted_text, max_days=CONFIG["MAX_AGE_DAYS"]):
     """Best-effort date verification supporting free text ('3 days ago') & absolute dates."""
     if not posted_text:
@@ -497,8 +519,8 @@ def process_and_partition_jobs(raw_items, config):
             continue
 
         # 5. Check Recency
-        posted_date = item.get("postedDate") or item.get("postedTimeAgo") or ""
-        if not is_recent_enough(posted_date, config["MAX_AGE_DAYS"]):
+        raw_posted_date = item.get("postedDate") or item.get("postedTimeAgo") or ""
+        if not is_recent_enough(raw_posted_date, config["MAX_AGE_DAYS"]):
             skipped_stale += 1
             continue
 
@@ -520,14 +542,16 @@ def process_and_partition_jobs(raw_items, config):
         for m_skill in missing_skills:
             missing_skill_counter[m_skill] += 1
 
+        posted_display = format_posted_date_ist(raw_posted_date)
+
         formatted_job = {
             "id": item.get("id", ""),
             "title": title or "Data Engineer",
             "company": company,
             "location": location or "Not specified",
             "salary": item.get("salary", ""),
-            "posted": item.get("postedTimeAgo") or item.get("postedDate") or "Recently",
-            "postedDateRaw": item.get("postedDate") or item.get("postedTimeAgo") or "",
+            "posted": posted_display,
+            "postedDateRaw": raw_posted_date,
             "url": url,
             "snippet": (description[:240] + "...") if len(description) > 240 else (description or "No description available."),
             "applicants": item.get("applicationsCount", ""),
