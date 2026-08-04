@@ -3,7 +3,7 @@ name: Daily Data Engineer Job Alert Pipeline
 on:
   schedule:
     # Trigger Monday through Friday at 10:00 AM IST (04:30 AM UTC) & 08:30 PM IST (03:00 PM UTC) - Excludes Saturday & Sunday
-    - cron: '30 4,15 * * 1-5'
+    - cron: '00 3,13 * * 1-5'
   workflow_dispatch: # Enables manual run from GitHub Actions UI
 
 permissions:
