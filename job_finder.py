@@ -46,7 +46,7 @@ CONFIG = {
     ],
     "SEARCH_LOCATION": "India",       # National anchor location for 1 single API call
     "DATE_POSTED": "r86400",          # "r86400" = 24h, "r604800" = past week, "r2592000" = past month
-    "RESULT_LIMIT": 300,              # Scrapes up to 300 records in 1 API call for max coverage
+    "RESULT_LIMIT": 150,              # Scrapes up to 300 records in 1 API call for max coverage
     "TARGET_COMPANIES": [],           # Empty [] searches ALL companies across India (max coverage!)
     "EXPERIENCE_LEVELS": [],          # Empty [] includes unclassified/Not Applicable recruiter tags
     "CONTRACT_TYPES": ["F"],          # F=Full-time
