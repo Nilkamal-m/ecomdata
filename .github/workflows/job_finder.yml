@@ -48,3 +48,4 @@ jobs:
             git add temp.csv
             git diff --staged --quiet || (git commit -m "Auto-update temp.csv with seen job records [skip ci]" && git push)
           fi
+
